@@ -57,11 +57,13 @@
   /* ---- upload card ---- */
   .panel { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: var(--shadow); }
   .drop {
-    border: 1.5px dashed #3a5040; border-radius: 14px; padding: 26px 16px; text-align: center;
-    background: linear-gradient(180deg, rgba(255,159,67,.05), transparent);
+    display: block;
+    border: 1.5px solid var(--line); border-radius: 14px; padding: 24px 16px; text-align: center;
+    background: linear-gradient(180deg, rgba(255,159,67,.06), rgba(255,159,67,.01));
     cursor: pointer; transition: border-color .15s, background .15s;
   }
-  .drop:active, .drop.hot { border-color: var(--accent); background: rgba(255,159,67,.09); }
+  .drop:hover { border-color: #3d5546; }
+  .drop:active, .drop.hot { border-color: var(--accent); background: rgba(255,159,67,.10); }
   .drop .ic { font-size: 2rem; }
   .drop .big { font-weight: 700; font-size: 1.05rem; margin-top: 6px; }
   .drop .sub { color: var(--muted); font-size: .82rem; margin-top: 2px; }
@@ -200,14 +202,19 @@ function setStatus(msg, cls = "") {
 }
 
 /* ---------- map ---------- */
-let map, youMarker, accCircle, cragMarkers = [];
+let map, youMarker, accCircle, cragMarkers = [], mapOk = false;
 function ensureMap() {
-  document.getElementById("mapWrap").style.display = "block";
-  if (map) return;
+  const wrap = document.getElementById("mapWrap");
+  wrap.style.display = "block";
+  if (map) { setTimeout(() => map.invalidateSize(), 0); return; }
+  if (typeof L === "undefined") { wrap.style.display = "none"; return; } // Leaflet didn't load — skip map, keep results
   map = L.map("map", { zoomControl: true, attributionControl: true });
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19, attribution: '© OpenStreetMap'
   }).addTo(map);
+  mapOk = true;
+  // A Leaflet map built inside a just-shown box renders blank until it re-measures.
+  setTimeout(() => map.invalidateSize(), 120);
 }
 function clearMap() {
   cragMarkers.forEach(m => map.removeLayer(m.marker)); cragMarkers = [];
@@ -345,17 +352,22 @@ async function findCrags(lat, lng, accuracy, source) {
     "ok"
   );
 
-  // map
-  ensureMap(); clearMap();
-  youMarker = L.circleMarker([lat, lng], { radius: 7, color: "#fff", weight: 2, fillColor: "#4fd1c5", fillOpacity: 1 })
-    .addTo(map).bindPopup(source === "photo" ? "Where the photo was taken" : "You");
-  if (accuracy) accCircle = L.circle([lat, lng], { radius: accuracy, color: "#4fd1c5", weight: 1, fillColor: "#4fd1c5", fillOpacity: .12 }).addTo(map);
+  // map (never let a map hiccup block the results list)
+  ensureMap();
+  if (mapOk && map) {
+    clearMap();
+    youMarker = L.circleMarker([lat, lng], { radius: 7, color: "#fff", weight: 2, fillColor: "#4fd1c5", fillOpacity: 1 })
+      .addTo(map).bindPopup(source === "photo" ? "Where the photo was taken" : "You");
+    if (accuracy) accCircle = L.circle([lat, lng], { radius: accuracy, color: "#4fd1c5", weight: 1, fillColor: "#4fd1c5", fillOpacity: .12 }).addTo(map);
+  }
 
   crags.forEach((c, i) => renderCrag(c, i));
 
-  // fit map to you + a few nearest crags
-  const pts = [[lat, lng], ...crags.slice(0, 6).map(c => [c.metadata.lat, c.metadata.lng])];
-  map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
+  if (mapOk && map) {
+    // fit map to you + a few nearest crags (after it has re-measured)
+    const pts = [[lat, lng], ...crags.slice(0, 6).map(c => [c.metadata.lat, c.metadata.lng])];
+    setTimeout(() => { map.invalidateSize(); map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 }); }, 150);
+  }
 
   resultsTitle.style.display = "block";
   noteEl.style.display = "block";
@@ -382,11 +394,14 @@ function renderCrag(c, i) {
   const head = el.querySelector(".cragHead");
   const box = el.querySelector(".climbs");
 
-  // map marker
-  const marker = L.circleMarker([c.metadata.lat, c.metadata.lng], { radius: 6, color: "#0e1410", weight: 1.5, fillColor: color, fillOpacity: .95 })
-    .addTo(map).bindPopup(`<b>${c.areaName}</b><br>${c.totalClimbs} climbs · ${fmtDist(c._d)}`);
-  cragMarkers.push({ marker, el });
-  marker.on("click", () => { openCrag(); el.scrollIntoView({ behavior: "smooth", block: "center" }); });
+  // map marker (only if the map is available)
+  let marker = null;
+  if (mapOk && map) {
+    marker = L.circleMarker([c.metadata.lat, c.metadata.lng], { radius: 6, color: "#0e1410", weight: 1.5, fillColor: color, fillOpacity: .95 })
+      .addTo(map).bindPopup(`<b>${c.areaName}</b><br>${c.totalClimbs} climbs · ${fmtDist(c._d)}`);
+    cragMarkers.push({ marker, el });
+    marker.on("click", () => { openCrag(); el.scrollIntoView({ behavior: "smooth", block: "center" }); });
+  }
 
   let loaded = false;
   function openCrag() {
@@ -399,7 +414,7 @@ function renderCrag(c, i) {
     const isOpen = el.classList.contains("open");
     if (isOpen) { el.classList.remove("open", "active"); box.style.display = "none"; return; }
     openCrag();
-    marker.openPopup();
+    if (marker) marker.openPopup();
   });
 
   async function loadClimbs() {

@@ -407,9 +407,22 @@ async function findCrags(lat, lng, accuracy, source) {
   crags.forEach((c, i) => renderCrag(c, i));
 
   if (mapOk && map) {
-    // fit map to you + a few nearest crags (after it has re-measured)
-    const pts = [[lat, lng], ...crags.slice(0, 6).map(c => [c.metadata.lat, c.metadata.lng])];
-    setTimeout(() => { map.invalidateSize(); map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 }); }, 150);
+    setTimeout(() => {
+      map.invalidateSize();
+      if (source === "photo" || source === "live") {
+        // Precise location: zoom in tight on the spot + only the crags right around it.
+        const near = crags.filter(c => c._d <= 600).slice(0, 5);
+        if (near.length) {
+          map.fitBounds([[lat, lng], ...near.map(c => [c.metadata.lat, c.metadata.lng])], { padding: [55, 55], maxZoom: 18 });
+        } else {
+          map.setView([lat, lng], 16); // nothing super close — still start zoomed in on the photo
+        }
+      } else {
+        // Sample / manual point: wider regional view.
+        const pts = [[lat, lng], ...crags.slice(0, 6).map(c => [c.metadata.lat, c.metadata.lng])];
+        map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
+      }
+    }, 150);
   }
 
   resultsTitle.style.display = "block";

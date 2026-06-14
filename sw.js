@@ -1,11 +1,14 @@
 // CragSnap service worker — makes the app installable and load instantly.
 // Strategy: always fetch fresh HTML when online (so updates show on refresh),
 // fall back to cache when offline; cache static assets (icons) cache-first.
-const CACHE = "cragsnap-v1";
+const CACHE = "cragsnap-v2";
 const SHELL = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
+  "./vendor/leaflet.js",
+  "./vendor/leaflet.css",
+  "./vendor/exifr.umd.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/apple-touch-icon.png"

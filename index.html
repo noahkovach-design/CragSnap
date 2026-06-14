@@ -13,7 +13,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="CragSnap" />
 <meta name="mobile-web-app-capable" content="yes" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="vendor/leaflet.css" />
 <style>
   :root {
     --bg: #0e1410;
@@ -131,6 +131,16 @@
   }
   .leaflet-tooltip.you-label::before { border-top-color: var(--teal); }
 
+  /* ---- offline saving ---- */
+  .saveBtn { width: 100%; background: rgba(79,209,197,.12); border-color: #2f5c56; color: var(--teal); }
+  .saveBtn:active { background: rgba(79,209,197,.2); }
+  .saveBtn:disabled { opacity: .8; }
+  .savedPanel { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 14px; }
+  .savedHead { font-size: .82rem; color: var(--teal); font-weight: 700; margin-bottom: 8px; }
+  .savedRow { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: .88rem; border-top: 1px solid var(--line); }
+  .savedRow small { color: var(--muted); }
+  .savedRow .rm { background: none; border: none; color: var(--bad); font-size: .8rem; cursor: pointer; padding: 4px 6px; }
+
   /* ---- results ---- */
   .sectionTitle { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 22px 4px 8px; }
   .crag { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
@@ -203,7 +213,13 @@
     <div class="status" id="status"></div>
   </div>
 
+  <div id="savedPanel" class="savedPanel" style="display:none"></div>
+
   <div id="mapWrap"><div id="map"></div></div>
+
+  <div id="saveBar" style="display:none; margin-top:18px;">
+    <button class="btn saveBtn" id="saveOfflineBtn">⬇ Save this area for offline</button>
+  </div>
 
   <div id="resultsTitle" class="sectionTitle" style="display:none">Nearby climbing</div>
   <div id="results"></div>
@@ -217,8 +233,8 @@
   </footer>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="vendor/exifr.umd.js"></script>
+<script src="vendor/leaflet.js"></script>
 <script>
 const API = "https://api.openbeta.io";
 const statusEl = document.getElementById("status");
@@ -227,6 +243,67 @@ const resultsTitle = document.getElementById("resultsTitle");
 const noteEl = document.getElementById("note");
 const preview = document.getElementById("preview");
 const drop = document.getElementById("drop");
+
+/* ---------- offline saved areas (stored on the phone) ---------- */
+const PACKS_KEY = "cragsnap.packs";
+let lastCrags = null, lastCenter = null; // the most recent ONLINE result, for "save offline"
+function loadPacks() { try { return JSON.parse(localStorage.getItem(PACKS_KEY)) || []; } catch { return []; } }
+function savePacks(p) { localStorage.setItem(PACKS_KEY, JSON.stringify(p)); }
+function packLabel(crags) {
+  const c = crags[0], toks = c.pathTokens || [];
+  return toks[toks.length - 2] || c.areaName || "Saved area"; // e.g. the parent area name
+}
+function findInPacks(lat, lng) {
+  const out = [], seen = new Set();
+  loadPacks().forEach(p => (p.crags || []).forEach(c => {
+    if (c.metadata && c.metadata.lat != null && !seen.has(c.uuid)) { seen.add(c.uuid); out.push(c); }
+  }));
+  return out;
+}
+function renderSavedPanel() {
+  const el = document.getElementById("savedPanel");
+  const packs = loadPacks();
+  if (!packs.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "block";
+  const totalCrags = packs.reduce((n, p) => n + (p.crags ? p.crags.length : 0), 0);
+  el.innerHTML = `<div class="savedHead">📥 Saved for offline: ${packs.length} area${packs.length > 1 ? "s" : ""} · ${totalCrags} crags</div>` +
+    packs.map(p => `<div class="savedRow"><span>${p.label} <small>(${p.crags.length} crags)</small></span><button class="rm" data-id="${p.id}">remove</button></div>`).join("");
+  el.querySelectorAll(".rm").forEach(b => b.addEventListener("click", () => {
+    savePacks(loadPacks().filter(p => p.id !== b.getAttribute("data-id")));
+    renderSavedPanel();
+  }));
+}
+async function saveAreaForOffline() {
+  if (!lastCrags || !lastCrags.length) return;
+  const btn = document.getElementById("saveOfflineBtn");
+  btn.disabled = true;
+  const total = lastCrags.length, enriched = [];
+  for (let i = 0; i < total; i++) {
+    const c = lastCrags[i];
+    btn.textContent = `Saving… (${i + 1}/${total})`;
+    let climbs = c.climbs;
+    if (!climbs) {
+      try {
+        const d = await gql(`query($u:ID){ area(uuid:$u){ climbs{ name metadata{ mp_id } grades{ vscale font } } } }`, { u: c.uuid });
+        climbs = (d && d.area && d.area.climbs) || [];
+      } catch { climbs = []; }
+    }
+    enriched.push({ areaName: c.areaName, uuid: c.uuid, totalClimbs: c.totalClimbs, pathTokens: c.pathTokens, metadata: c.metadata, climbs });
+  }
+  const packs = loadPacks();
+  packs.push({ id: String(Date.now()), label: packLabel(enriched), savedAt: Date.now(), center: lastCenter, crags: enriched });
+  try { savePacks(packs); }
+  catch {
+    btn.disabled = false; btn.textContent = "⬇ Save this area for offline";
+    setStatus("Couldn't save — your phone's storage for this app may be full. Remove a saved area and try again.", "err");
+    return;
+  }
+  btn.textContent = "✓ Saved — works with no signal";
+  renderSavedPanel();
+  setTimeout(() => { btn.disabled = false; btn.textContent = "⬇ Save this area for offline"; }, 3000);
+}
+document.getElementById("saveOfflineBtn").addEventListener("click", saveAreaForOffline);
+renderSavedPanel();
 
 function setStatus(msg, cls = "") {
   statusEl.className = "status " + cls;
@@ -409,10 +486,8 @@ async function gql(query, variables) {
   return (await r.json()).data;
 }
 
-/* ---------- main search ---------- */
-async function findCrags(lat, lng, accuracy, source) {
-  resultsEl.innerHTML = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
-  resultsTitle.style.display = "none";
+/* ---------- live database lookup (throws on network failure) ---------- */
+async function fetchLiveCrags(lat, lng) {
   const q = `query($lat:Float!,$lng:Float!,$max:Int!){
     cragsNear(lnglat:{lat:$lat,lng:$lng}, maxDistance:$max, includeCrags:true){
       crags { areaName uuid totalClimbs pathTokens metadata{ lat lng mp_id isBoulder } }
@@ -421,69 +496,90 @@ async function findCrags(lat, lng, accuracy, source) {
   const radii = [1500, 8000, 40000, 150000];
   let crags = [];
   for (const max of radii) {
-    let data;
-    try { data = await gql(q, { lat, lng, max }); }
-    catch { setStatus("Network error reaching the climbing database.", "err"); resultsEl.innerHTML = ""; return; }
+    const data = await gql(q, { lat, lng, max });
     crags = [];
     (data?.cragsNear || []).forEach(g => crags.push(...(g.crags || [])));
     crags = crags.filter(c => c.totalClimbs > 0 && c.metadata.lat != null);
     if (crags.length) break;
   }
+  return crags;
+}
+
+/* ---------- main search (online, with offline fallback to saved areas) ---------- */
+async function findCrags(lat, lng, accuracy, source) {
+  resultsEl.innerHTML = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
+  resultsTitle.style.display = "none";
+  document.getElementById("saveBar").style.display = "none";
+
+  let crags = [], offline = false;
+  if (navigator.onLine) {
+    try { crags = await fetchLiveCrags(lat, lng); }
+    catch { crags = findInPacks(lat, lng); offline = true; } // signal dropped mid-request — use saved data
+  } else {
+    crags = findInPacks(lat, lng); offline = true;
+  }
 
   resultsEl.innerHTML = "";
   if (!crags.length) {
-    setStatus("No climbing areas found within ~150 km. This spot may not be in the open database yet (it has fewer entries than Mountain Project).", "err");
+    setStatus(
+      offline
+        ? "You're offline and haven't saved this area. When you have signal, search this spot and tap “Save this area for offline” before heading out."
+        : "No climbing areas found within ~150 km. This spot may not be in the open database yet (it has fewer entries than Mountain Project).",
+      "err"
+    );
     return;
   }
+
   crags.forEach(c => c._d = haversine(lat, lng, c.metadata.lat, c.metadata.lng));
   crags.sort((a,b) => a._d - b._d);
   crags = crags.slice(0, 20);
 
   const nearest = crags[0]._d;
   const label = source === "photo" ? "from your photo" : source === "video" ? "from your video" : source === "live" ? "from your location" : "";
-  setStatus(
-    nearest < 300
-      ? `Found ${crags.length} area${crags.length>1?"s":""} right ${label || "nearby"}. Closest first.`
-      : `Showing the ${crags.length} nearest areas (closest is ${fmtDist(nearest)} away ${label}).`,
-    "ok"
-  );
+  const where = nearest < 300
+    ? `Found ${crags.length} area${crags.length>1?"s":""} right ${label || "nearby"}. Closest first.`
+    : `Showing the ${crags.length} nearest areas (closest is ${fmtDist(nearest)} away ${label}).`;
+  setStatus(offline ? "📴 Offline — using saved data. " + where : where, "ok");
 
-  // map (never let a map hiccup block the results list)
-  ensureMap();
-  if (mapOk && map) {
-    clearMap();
-    const you = {
-      photo:  { emoji: "📷", label: "Photo taken here" },
-      video:  { emoji: "🎥", label: "Video taken here" },
-      live:   { emoji: "🧗", label: "You are here" },
-      sample: { emoji: "📍", label: "Sample spot" },
-      manual: { emoji: "📍", label: "Search point" }
-    }[source] || { emoji: "📍", label: "Search point" };
-    const youIcon = L.divIcon({
-      className: "you-pin",
-      html: `<div class="pulse"></div><div class="dot">${you.emoji}</div>`,
-      iconSize: [38, 38], iconAnchor: [19, 19], tooltipAnchor: [0, -22]
-    });
-    youMarker = L.marker([lat, lng], { icon: youIcon, zIndexOffset: 1000 }).addTo(map);
-    youMarker.bindTooltip(you.label, { permanent: true, direction: "top", className: "you-label", offset: [0, -4] });
-    if (accuracy) accCircle = L.circle([lat, lng], { radius: accuracy, color: "#4fd1c5", weight: 1, fillColor: "#4fd1c5", fillOpacity: .12 }).addTo(map);
+  // Map only when online (offline has no tiles; the route list is what matters).
+  if (offline) {
+    if (mapOk && map) clearMap();
+    document.getElementById("mapWrap").style.display = "none";
+  } else {
+    ensureMap();
+    if (mapOk && map) {
+      clearMap();
+      const you = {
+        photo:  { emoji: "📷", label: "Photo taken here" },
+        video:  { emoji: "🎥", label: "Video taken here" },
+        live:   { emoji: "🧗", label: "You are here" },
+        sample: { emoji: "📍", label: "Sample spot" },
+        manual: { emoji: "📍", label: "Search point" }
+      }[source] || { emoji: "📍", label: "Search point" };
+      const youIcon = L.divIcon({
+        className: "you-pin",
+        html: `<div class="pulse"></div><div class="dot">${you.emoji}</div>`,
+        iconSize: [38, 38], iconAnchor: [19, 19], tooltipAnchor: [0, -22]
+      });
+      youMarker = L.marker([lat, lng], { icon: youIcon, zIndexOffset: 1000 }).addTo(map);
+      youMarker.bindTooltip(you.label, { permanent: true, direction: "top", className: "you-label", offset: [0, -4] });
+      if (accuracy) accCircle = L.circle([lat, lng], { radius: accuracy, color: "#4fd1c5", weight: 1, fillColor: "#4fd1c5", fillOpacity: .12 }).addTo(map);
+    }
   }
 
   crags.forEach((c, i) => renderCrag(c, i));
 
-  if (mapOk && map) {
+  if (!offline && mapOk && map) {
     setTimeout(() => {
       map.invalidateSize();
       if (source === "photo" || source === "video" || source === "live") {
-        // Precise location: zoom in tight on the spot + only the crags right around it.
         const near = crags.filter(c => c._d <= 600).slice(0, 5);
         if (near.length) {
           map.fitBounds([[lat, lng], ...near.map(c => [c.metadata.lat, c.metadata.lng])], { padding: [55, 55], maxZoom: 18 });
         } else {
-          map.setView([lat, lng], 16); // nothing super close — still start zoomed in on the photo
+          map.setView([lat, lng], 16);
         }
       } else {
-        // Sample / manual point: wider regional view.
         const pts = [[lat, lng], ...crags.slice(0, 6).map(c => [c.metadata.lat, c.metadata.lng])];
         map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
       }
@@ -492,6 +588,12 @@ async function findCrags(lat, lng, accuracy, source) {
 
   resultsTitle.style.display = "block";
   noteEl.style.display = "block";
+
+  // Offer "save for offline" only after a successful ONLINE search.
+  if (!offline) {
+    lastCrags = crags; lastCenter = { lat, lng };
+    document.getElementById("saveBar").style.display = "block";
+  }
 }
 
 /* ---------- render one crag + its map pin ---------- */
@@ -540,31 +642,36 @@ function renderCrag(c, i) {
 
   async function loadClimbs() {
     loaded = true;
-    box.innerHTML = '<div class="climb"><span class="spinner"></span>&nbsp; loading routes…</div>';
-    try {
-      const d = await gql(`query($u:ID){ area(uuid:$u){ climbs{ name metadata{ mp_id } grades{ vscale font } } } }`, { u: c.uuid });
-      const climbs = d?.area?.climbs || [];
-      box.innerHTML = "";
-      if (!climbs.length) {
-        box.innerHTML = '<div class="climb">Routes here are filed under sub-areas — open the crag on Mountain Project below.</div>';
-      } else {
-        climbs.forEach(cl => {
-          const g = cl.grades?.vscale || cl.grades?.font || "";
-          const url = cl.metadata?.mp_id ? `https://www.mountainproject.com/route/${cl.metadata.mp_id}` : "#";
-          const row = document.createElement("div");
-          row.className = "climb";
-          row.innerHTML = `<a href="${url}" target="_blank" rel="noopener">${cl.name} ↗</a>${g ? `<span class="grade">${g}</span>` : ""}`;
-          box.appendChild(row);
-        });
+    let climbs = c.climbs; // present when this crag came from saved offline data
+    if (!climbs) {
+      box.innerHTML = '<div class="climb"><span class="spinner"></span>&nbsp; loading routes…</div>';
+      try {
+        const d = await gql(`query($u:ID){ area(uuid:$u){ climbs{ name metadata{ mp_id } grades{ vscale font } } } }`, { u: c.uuid });
+        climbs = d?.area?.climbs || [];
+      } catch {
+        box.innerHTML = '<div class="climb">Could not load routes — you may be offline and haven\'t saved this area.</div>';
+        loaded = false;
+        return;
       }
-      const mp = document.createElement("a");
-      mp.className = "mpLink"; mp.target = "_blank"; mp.rel = "noopener";
-      mp.href = `https://www.mountainproject.com/area/${c.metadata.mp_id}`;
-      mp.textContent = "→ Open this whole crag on Mountain Project";
-      box.appendChild(mp);
-    } catch {
-      box.innerHTML = '<div class="climb">Could not load routes.</div>';
     }
+    box.innerHTML = "";
+    if (!climbs.length) {
+      box.innerHTML = '<div class="climb">Routes here are filed under sub-areas — open the crag on Mountain Project below.</div>';
+    } else {
+      climbs.forEach(cl => {
+        const g = cl.grades?.vscale || cl.grades?.font || "";
+        const url = cl.metadata?.mp_id ? `https://www.mountainproject.com/route/${cl.metadata.mp_id}` : "#";
+        const row = document.createElement("div");
+        row.className = "climb";
+        row.innerHTML = `<a href="${url}" target="_blank" rel="noopener">${cl.name} ↗</a>${g ? `<span class="grade">${g}</span>` : ""}`;
+        box.appendChild(row);
+      });
+    }
+    const mp = document.createElement("a");
+    mp.className = "mpLink"; mp.target = "_blank"; mp.rel = "noopener";
+    mp.href = `https://www.mountainproject.com/area/${c.metadata.mp_id}`;
+    mp.textContent = "→ Open this whole crag on Mountain Project";
+    box.appendChild(mp);
   }
   resultsEl.appendChild(el);
 }

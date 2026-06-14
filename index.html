@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#11140f" />
+<title>CragSnap — find the climb from a photo</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --bg: #0e1410;
+    --bg2: #121a14;
+    --card: #18211a;
+    --card2: #202b22;
+    --text: #eef3ee;
+    --muted: #93a596;
+    --accent: #ff9f43;       /* warm sandstone */
+    --accent-ink: #271603;
+    --teal: #4fd1c5;
+    --line: #283a2d;
+    --good: #5fd38a;
+    --bad: #ff8a80;
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background:
+      radial-gradient(1200px 500px at 100% -10%, #1b2a1e 0%, transparent 60%),
+      radial-gradient(900px 500px at -10% 0%, #1a241c 0%, transparent 55%),
+      var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 0 16px calc(60px + env(safe-area-inset-bottom)); }
+
+  /* ---- header ---- */
+  header {
+    position: sticky; top: 0; z-index: 600;
+    backdrop-filter: blur(10px);
+    background: rgba(14,20,16,.72);
+    border-bottom: 1px solid var(--line);
+    margin: 0 -16px 20px;
+    padding: 12px 16px calc(12px + env(safe-area-inset-top));
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+  .brand { display: flex; align-items: center; gap: 10px; max-width: 680px; margin: 0 auto; }
+  .logo { width: 34px; height: 34px; flex: 0 0 auto; }
+  .brand h1 { font-size: 1.2rem; margin: 0; letter-spacing: -.02em; }
+  .brand h1 span { color: var(--accent); }
+  .brand .tag { margin-left: auto; font-size: .68rem; color: var(--muted); border: 1px solid var(--line); padding: 3px 9px; border-radius: 999px; }
+
+  .lede { color: var(--muted); font-size: .95rem; margin: 0 0 18px; }
+
+  /* ---- upload card ---- */
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: var(--shadow); }
+  .drop {
+    border: 1.5px dashed #3a5040; border-radius: 14px; padding: 26px 16px; text-align: center;
+    background: linear-gradient(180deg, rgba(255,159,67,.05), transparent);
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .drop:active, .drop.hot { border-color: var(--accent); background: rgba(255,159,67,.09); }
+  .drop .ic { font-size: 2rem; }
+  .drop .big { font-weight: 700; font-size: 1.05rem; margin-top: 6px; }
+  .drop .sub { color: var(--muted); font-size: .82rem; margin-top: 2px; }
+  input[type=file] { display: none; }
+
+  .row { display: flex; gap: 10px; margin-top: 12px; }
+  .btn {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+    background: var(--card2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 11px; padding: 12px; font-size: .88rem; font-weight: 600; cursor: pointer;
+    transition: background .12s, transform .05s;
+  }
+  .btn:active { background: #2a382c; transform: scale(.985); }
+  .btn .ic { font-size: 1rem; }
+
+  .manual { margin-top: 10px; display: none; gap: 8px; }
+  .manual input { flex: 1; min-width: 0; background: var(--card2); border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 11px; font-size: .9rem; }
+  .manual input::placeholder { color: #5f7165; }
+
+  #preview { width: 100%; border-radius: 12px; margin-top: 14px; display: none; max-height: 300px; object-fit: cover; border: 1px solid var(--line); }
+
+  .status { font-size: .9rem; color: var(--muted); margin-top: 14px; min-height: 1.2em; display: flex; gap: 7px; align-items: flex-start; }
+  .status.err { color: var(--bad); }
+  .status.ok { color: var(--good); }
+
+  /* ---- map ---- */
+  #mapWrap { display: none; margin-top: 18px; }
+  #map { height: 280px; border-radius: 16px; border: 1px solid var(--line); box-shadow: var(--shadow); z-index: 1; }
+  .leaflet-container { background: #0c120e; font: inherit; }
+  .leaflet-popup-content-wrapper { background: var(--card2); color: var(--text); border-radius: 10px; }
+  .leaflet-popup-tip { background: var(--card2); }
+  .leaflet-popup-content { margin: 9px 12px; font-size: .85rem; }
+  .leaflet-control-attribution { background: rgba(0,0,0,.4) !important; color: #7d8f81 !important; }
+  .leaflet-control-attribution a { color: #93a596 !important; }
+
+  /* ---- results ---- */
+  .sectionTitle { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 22px 4px 8px; }
+  .crag { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
+  .crag.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .cragHead { padding: 14px 15px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .cragHead:active { background: var(--card2); }
+  .cragName { font-weight: 650; font-size: 1.04rem; display: flex; align-items: center; gap: 7px; }
+  .cragMeta { color: var(--muted); font-size: .8rem; margin-top: 3px; }
+  .dist { color: var(--accent); font-weight: 800; font-size: .9rem; white-space: nowrap; text-align: right; }
+  .dist small { display: block; color: var(--muted); font-weight: 500; font-size: .68rem; }
+  .pin { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center; font-size: .7rem; font-weight: 800; color: #11140f; }
+  .chev { color: var(--muted); transition: transform .2s; font-size: .8rem; }
+  .crag.open .chev { transform: rotate(90deg); }
+
+  .climbs { display: none; border-top: 1px solid var(--line); }
+  .climb { display: flex; justify-content: space-between; align-items: center; padding: 11px 15px; border-bottom: 1px solid var(--line); }
+  .climb:last-of-type { border-bottom: none; }
+  .climb a { color: var(--text); text-decoration: none; font-size: .92rem; }
+  .climb a:active { color: var(--accent); }
+  .grade { font-size: .78rem; color: var(--accent); font-weight: 800; background: rgba(255,159,67,.12); padding: 3px 9px; border-radius: 7px; white-space: nowrap; margin-left: 10px; }
+  .mpLink { display: block; padding: 12px 15px; font-size: .85rem; color: var(--teal); text-decoration: none; font-weight: 600; }
+  .mpLink:active { color: var(--accent); }
+
+  .note { font-size: .82rem; color: var(--muted); background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-top: 20px; display: none; }
+  .note b { color: var(--text); }
+
+  .spinner { display: inline-block; width: 15px; height: 15px; border: 2px solid #3a5040; border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; flex: 0 0 auto; margin-top: 1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .skel { height: 64px; border-radius: 14px; margin-bottom: 10px; background: linear-gradient(90deg, var(--card) 25%, var(--card2) 37%, var(--card) 63%); background-size: 400% 100%; animation: sh 1.3s ease infinite; }
+  @keyframes sh { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="48" height="48" rx="12" fill="#18211a" stroke="#283a2d"/>
+      <path d="M7 34 L18 17 L26 28 L31 21 L41 34 Z" fill="#3a5040"/>
+      <path d="M18 17 L26 28 L21 34 L7 34 Z" fill="#4a6450"/>
+      <circle cx="33" cy="14" r="4.2" fill="#ff9f43"/>
+    </svg>
+    <h1>Crag<span>Snap</span></h1>
+    <span class="tag">prototype</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <p class="lede">Drop a climbing photo. We read where it was taken, map the boulders &amp; crags nearby, and link each route to Mountain&nbsp;Project.</p>
+
+  <div class="panel">
+    <label class="drop" id="drop" for="file">
+      <div class="ic">📷</div>
+      <div class="big">Upload a climbing photo</div>
+      <div class="sub">tap to choose · or drag a photo here</div>
+    </label>
+    <input type="file" id="file" accept="image/*" />
+
+    <div class="row">
+      <button class="btn" id="hereBtn"><span class="ic">📍</span> My location</button>
+      <button class="btn" id="sampleBtn"><span class="ic">🪨</span> Try a sample</button>
+    </div>
+    <div class="manual" id="manual">
+      <input id="latIn" placeholder="latitude" inputmode="decimal" />
+      <input id="lngIn" placeholder="longitude" inputmode="decimal" />
+      <button class="btn" style="flex:0 0 auto" id="goManual">Go</button>
+    </div>
+
+    <img id="preview" alt="your photo" />
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="mapWrap"><div id="map"></div></div>
+
+  <div id="resultsTitle" class="sectionTitle" style="display:none">Nearby climbing</div>
+  <div id="results"></div>
+
+  <div class="note" id="note">
+    <b>How sure is this?</b> Phone GPS is only accurate to ~5–30 ft — and worse against big walls (Yosemite!) where rock blocks the signal. The shaded circle on the map is your GPS margin of error, so the right boulder is whichever pin sits in it. Tap a crag to see its routes and confirm by eye. <em>Auto-identifying the exact route from the image itself is a future feature.</em>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API = "https://api.openbeta.io";
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+const resultsTitle = document.getElementById("resultsTitle");
+const noteEl = document.getElementById("note");
+const preview = document.getElementById("preview");
+const drop = document.getElementById("drop");
+
+function setStatus(msg, cls = "") {
+  statusEl.className = "status " + cls;
+  statusEl.innerHTML = (cls === "" && msg.includes("…") ? '<span class="spinner"></span>' : "") +
+    "<span>" + msg + "</span>";
+}
+
+/* ---------- map ---------- */
+let map, youMarker, accCircle, cragMarkers = [];
+function ensureMap() {
+  document.getElementById("mapWrap").style.display = "block";
+  if (map) return;
+  map = L.map("map", { zoomControl: true, attributionControl: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: '© OpenStreetMap'
+  }).addTo(map);
+}
+function clearMap() {
+  cragMarkers.forEach(m => map.removeLayer(m.marker)); cragMarkers = [];
+  if (youMarker) { map.removeLayer(youMarker); youMarker = null; }
+  if (accCircle) { map.removeLayer(accCircle); accCircle = null; }
+}
+
+/* ---------- photo upload ---------- */
+function handleFile(f) {
+  if (!f) return;
+  preview.src = URL.createObjectURL(f);
+  preview.style.display = "block";
+  resultsEl.innerHTML = ""; resultsTitle.style.display = "none";
+  setStatus("Reading photo location…");
+  exifr.gps(f).then(gps => {
+    if (gps && gps.latitude) {
+      setStatus("Found location saved in the photo ✓", "ok");
+      findCrags(gps.latitude, gps.longitude, null, "photo");
+    } else {
+      setStatus("This photo has no GPS saved in it. Use “My location” (if you're at the crag) or enter coordinates below.", "err");
+      document.getElementById("manual").style.display = "flex";
+    }
+  }).catch(() => {
+    setStatus("Couldn't read that photo. Try “My location” or enter coordinates.", "err");
+    document.getElementById("manual").style.display = "flex";
+  });
+}
+document.getElementById("file").addEventListener("change", e => handleFile(e.target.files[0]));
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => { if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+
+/* ---------- current location (multi-reading for accuracy) ---------- */
+document.getElementById("hereBtn").addEventListener("click", () => {
+  if (!navigator.geolocation) { setStatus("Your browser can't share location.", "err"); return; }
+  if (!window.isSecureContext) {
+    setStatus("“My location” only works on an https:// page (not a double-clicked file). You're already hosted — if you still see this, reload over https. Photo upload + sample work regardless.", "err");
+    document.getElementById("manual").style.display = "flex";
+    return;
+  }
+  setStatus("Locking onto GPS… (allow the prompt; hold still a few seconds)");
+  let best = null, count = 0;
+  const watch = navigator.geolocation.watchPosition(p => {
+    count++;
+    if (!best || p.coords.accuracy < best.coords.accuracy) best = p;
+    setStatus(`Locking onto GPS… best so far ±${Math.round(best.coords.accuracy)} m`);
+    // Good enough, or we've taken several readings — stop and use the best.
+    if (best.coords.accuracy <= 15 || count >= 6) finish();
+  }, err => {
+    const msg = {
+      1: "Location permission denied. Tap the lock/location icon in the address bar, allow it, then try again.",
+      2: "Your device couldn't get a fix. Try again outdoors, or enter coordinates below.",
+      3: "Timed out getting location. Try again or enter coordinates below."
+    }[err.code] || "Couldn't get your location.";
+    navigator.geolocation.clearWatch(watch);
+    setStatus(msg, "err");
+    document.getElementById("manual").style.display = "flex";
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+
+  // Safety stop after 9s in case readings keep trickling.
+  const cap = setTimeout(() => { if (best) finish(); }, 9000);
+  function finish() {
+    clearTimeout(cap);
+    navigator.geolocation.clearWatch(watch);
+    if (!best) return;
+    setStatus(`Got your location ✓ accurate to ±${Math.round(best.coords.accuracy)} m`, "ok");
+    findCrags(best.coords.latitude, best.coords.longitude, best.coords.accuracy, "live");
+  }
+});
+
+document.getElementById("sampleBtn").addEventListener("click", () => {
+  setStatus("Sample spot: Flagstaff Mountain, Boulder CO 🪨", "ok");
+  findCrags(40.0011, -105.297, null, "sample");
+});
+document.getElementById("goManual").addEventListener("click", () => {
+  const lat = parseFloat(document.getElementById("latIn").value);
+  const lng = parseFloat(document.getElementById("lngIn").value);
+  if (isNaN(lat) || isNaN(lng)) { setStatus("Enter valid numbers for both.", "err"); return; }
+  findCrags(lat, lng, null, "manual");
+});
+
+/* ---------- distance helpers ---------- */
+function haversine(la1, lo1, la2, lo2) {
+  const R = 6371000, toR = d => d * Math.PI / 180;
+  const dLa = toR(la2 - la1), dLo = toR(lo2 - lo1);
+  const a = Math.sin(dLa/2)**2 + Math.cos(toR(la1))*Math.cos(toR(la2))*Math.sin(dLo/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+function fmtDist(m) {
+  if (m < 950) return Math.round(m) + " m";
+  return (m/1000).toFixed(m < 9500 ? 1 : 0) + " km";
+}
+
+async function gql(query, variables) {
+  const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }) });
+  return (await r.json()).data;
+}
+
+/* ---------- main search ---------- */
+async function findCrags(lat, lng, accuracy, source) {
+  resultsEl.innerHTML = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
+  resultsTitle.style.display = "none";
+  const q = `query($lat:Float!,$lng:Float!,$max:Int!){
+    cragsNear(lnglat:{lat:$lat,lng:$lng}, maxDistance:$max, includeCrags:true){
+      crags { areaName uuid totalClimbs pathTokens metadata{ lat lng mp_id isBoulder } }
+    }
+  }`;
+  const radii = [1500, 8000, 40000, 150000];
+  let crags = [];
+  for (const max of radii) {
+    let data;
+    try { data = await gql(q, { lat, lng, max }); }
+    catch { setStatus("Network error reaching the climbing database.", "err"); resultsEl.innerHTML = ""; return; }
+    crags = [];
+    (data?.cragsNear || []).forEach(g => crags.push(...(g.crags || [])));
+    crags = crags.filter(c => c.totalClimbs > 0 && c.metadata.lat != null);
+    if (crags.length) break;
+  }
+
+  resultsEl.innerHTML = "";
+  if (!crags.length) {
+    setStatus("No climbing areas found within ~150 km. This spot may not be in the open database yet (it has fewer entries than Mountain Project).", "err");
+    return;
+  }
+  crags.forEach(c => c._d = haversine(lat, lng, c.metadata.lat, c.metadata.lng));
+  crags.sort((a,b) => a._d - b._d);
+  crags = crags.slice(0, 20);
+
+  const nearest = crags[0]._d;
+  const label = source === "photo" ? "from your photo" : source === "live" ? "from your location" : "";
+  setStatus(
+    nearest < 300
+      ? `Found ${crags.length} area${crags.length>1?"s":""} right ${label || "nearby"}. Closest first.`
+      : `Showing the ${crags.length} nearest areas (closest is ${fmtDist(nearest)} away ${label}).`,
+    "ok"
+  );
+
+  // map
+  ensureMap(); clearMap();
+  youMarker = L.circleMarker([lat, lng], { radius: 7, color: "#fff", weight: 2, fillColor: "#4fd1c5", fillOpacity: 1 })
+    .addTo(map).bindPopup(source === "photo" ? "Where the photo was taken" : "You");
+  if (accuracy) accCircle = L.circle([lat, lng], { radius: accuracy, color: "#4fd1c5", weight: 1, fillColor: "#4fd1c5", fillOpacity: .12 }).addTo(map);
+
+  crags.forEach((c, i) => renderCrag(c, i));
+
+  // fit map to you + a few nearest crags
+  const pts = [[lat, lng], ...crags.slice(0, 6).map(c => [c.metadata.lat, c.metadata.lng])];
+  map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
+
+  resultsTitle.style.display = "block";
+  noteEl.style.display = "block";
+}
+
+/* ---------- render one crag + its map pin ---------- */
+function renderCrag(c, i) {
+  const isB = c.metadata.isBoulder;
+  const color = isB ? "#ff9f43" : "#4fd1c5";
+  const el = document.createElement("div");
+  el.className = "crag";
+  const path = (c.pathTokens || []).slice(0, -1).join(" › ");
+  el.innerHTML = `
+    <div class="cragHead">
+      <div class="pin" style="background:${color}">${isB ? "B" : "R"}</div>
+      <div style="flex:1; min-width:0">
+        <div class="cragName">${c.areaName}</div>
+        <div class="cragMeta">${path} · ${c.totalClimbs} climb${c.totalClimbs>1?"s":""}</div>
+      </div>
+      <div class="dist">${fmtDist(c._d)}<small>${isB ? "boulder" : "routes"}</small></div>
+      <div class="chev">▶</div>
+    </div>
+    <div class="climbs"></div>`;
+  const head = el.querySelector(".cragHead");
+  const box = el.querySelector(".climbs");
+
+  // map marker
+  const marker = L.circleMarker([c.metadata.lat, c.metadata.lng], { radius: 6, color: "#0e1410", weight: 1.5, fillColor: color, fillOpacity: .95 })
+    .addTo(map).bindPopup(`<b>${c.areaName}</b><br>${c.totalClimbs} climbs · ${fmtDist(c._d)}`);
+  cragMarkers.push({ marker, el });
+  marker.on("click", () => { openCrag(); el.scrollIntoView({ behavior: "smooth", block: "center" }); });
+
+  let loaded = false;
+  function openCrag() {
+    cragMarkers.forEach(m => m.el.classList.remove("active"));
+    el.classList.add("active", "open");
+    box.style.display = "block";
+    if (!loaded) loadClimbs();
+  }
+  head.addEventListener("click", async () => {
+    const isOpen = el.classList.contains("open");
+    if (isOpen) { el.classList.remove("open", "active"); box.style.display = "none"; return; }
+    openCrag();
+    marker.openPopup();
+  });
+
+  async function loadClimbs() {
+    loaded = true;
+    box.innerHTML = '<div class="climb"><span class="spinner"></span>&nbsp; loading routes…</div>';
+    try {
+      const d = await gql(`query($u:ID){ area(uuid:$u){ climbs{ name metadata{ mp_id } grades{ vscale font } } } }`, { u: c.uuid });
+      const climbs = d?.area?.climbs || [];
+      box.innerHTML = "";
+      if (!climbs.length) {
+        box.innerHTML = '<div class="climb">Routes here are filed under sub-areas — open the crag on Mountain Project below.</div>';
+      } else {
+        climbs.forEach(cl => {
+          const g = cl.grades?.vscale || cl.grades?.font || "";
+          const url = cl.metadata?.mp_id ? `https://www.mountainproject.com/route/${cl.metadata.mp_id}` : "#";
+          const row = document.createElement("div");
+          row.className = "climb";
+          row.innerHTML = `<a href="${url}" target="_blank" rel="noopener">${cl.name} ↗</a>${g ? `<span class="grade">${g}</span>` : ""}`;
+          box.appendChild(row);
+        });
+      }
+      const mp = document.createElement("a");
+      mp.className = "mpLink"; mp.target = "_blank"; mp.rel = "noopener";
+      mp.href = `https://www.mountainproject.com/area/${c.metadata.mp_id}`;
+      mp.textContent = "→ Open this whole crag on Mountain Project";
+      box.appendChild(mp);
+    } catch {
+      box.innerHTML = '<div class="climb">Could not load routes.</div>';
+    }
+  }
+  resultsEl.appendChild(el);
+}
+</script>
+</body>
+</html>

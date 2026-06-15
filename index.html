@@ -511,19 +511,21 @@ async function findCrags(lat, lng, accuracy, source) {
   resultsTitle.style.display = "none";
   document.getElementById("saveBar").style.display = "none";
 
+  // Always TRY the live database first (the browser's online/offline flag is
+  // unreliable — it can wrongly report "offline" on good wifi). Only fall back
+  // to saved data if the request actually fails.
   let crags = [], offline = false;
-  if (navigator.onLine) {
-    try { crags = await fetchLiveCrags(lat, lng); }
-    catch { crags = findInPacks(lat, lng); offline = true; } // signal dropped mid-request — use saved data
-  } else {
-    crags = findInPacks(lat, lng); offline = true;
+  try {
+    crags = await fetchLiveCrags(lat, lng);
+  } catch {
+    crags = findInPacks(lat, lng); offline = true; // couldn't reach the database — use saved data
   }
 
   resultsEl.innerHTML = "";
   if (!crags.length) {
     setStatus(
       offline
-        ? "You're offline and haven't saved this area. When you have signal, search this spot and tap “Save this area for offline” before heading out."
+        ? "Couldn't reach the climbing database (you may be offline). If you saved this area for offline it'll appear here — otherwise reconnect and try again."
         : "No climbing areas found within ~150 km. This spot may not be in the open database yet (it has fewer entries than Mountain Project).",
       "err"
     );

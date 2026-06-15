@@ -153,6 +153,13 @@
   .planRow input::placeholder { color: #5f7165; }
   #planInfo { font-size: .88rem; color: var(--text); margin-top: 12px; }
   #planInfo b { color: var(--accent); }
+  .suggest { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--card2); }
+  .sugItem { padding: 11px 13px; cursor: pointer; border-top: 1px solid var(--line); font-size: .9rem; }
+  .sugItem:first-child { border-top: none; }
+  .sugItem:active, .sugItem.hl { background: #2a382c; }
+  .sugItem .sName { font-weight: 600; }
+  .sugItem .sPlace { color: var(--muted); font-size: .8rem; }
+  .suggest .sugInfo { padding: 10px 13px; color: var(--muted); font-size: .82rem; }
 
   /* ---- results ---- */
   .sectionTitle { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 22px 4px 8px; }
@@ -230,9 +237,10 @@
     <div class="planTitle">🗺️ Download a whole area for offline</div>
     <div class="planSub">Heading somewhere remote? Save the routes before you lose signal — no photo needed.</div>
     <div class="planRow">
-      <input id="placeIn" placeholder="Search a place — e.g. Joshua Tree" autocomplete="off" />
+      <input id="placeIn" placeholder="Search a place — e.g. Joshua Tree" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
       <button class="btn" id="placeBtn" style="flex:0 0 auto">Search</button>
     </div>
+    <div id="suggest" class="suggest" style="display:none"></div>
     <div id="planResult" style="display:none">
       <div id="planInfo"></div>
       <div class="planRow">
@@ -349,12 +357,25 @@ function planStatus(msg, cls = "") {
   planStatusEl.className = "status " + cls;
   planStatusEl.innerHTML = (cls === "" && msg.includes("…") ? '<span class="spinner"></span>' : "") + "<span>" + msg + "</span>";
 }
-async function geocodePlace(q) {
-  const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(q);
-  const r = await fetch(url, { headers: { "Accept": "application/json" } });
+// Photon (OpenStreetMap-based) is built for as-you-type search — partial names + typos.
+let sugAbort = null;
+async function photonSearch(q, limit) {
+  if (sugAbort) sugAbort.abort();
+  sugAbort = new AbortController();
+  const url = "https://photon.komoot.io/api/?limit=" + (limit || 6) + "&q=" + encodeURIComponent(q);
+  const r = await fetch(url, { signal: sugAbort.signal });
   const j = await r.json();
-  if (!j || !j.length) return null;
-  return { lat: parseFloat(j[0].lat), lng: parseFloat(j[0].lon), name: j[0].display_name };
+  const seen = new Set(), out = [];
+  (j.features || []).forEach(f => {
+    const p = f.properties || {}, c = (f.geometry || {}).coordinates;
+    if (!c || !p.name) return;
+    const place = [p.state, p.country].filter(Boolean).join(", ");
+    const key = p.name + "|" + place;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: p.name, place, label: place ? `${p.name}, ${place}` : p.name, lat: c[1], lng: c[0] });
+  });
+  return out;
 }
 async function fetchRegionCrags(lat, lng, max) {
   const q = `query($lat:Float!,$lng:Float!,$max:Int!){ cragsNear(lnglat:{lat:$lat,lng:$lng}, maxDistance:$max, includeCrags:true){ crags{ areaName uuid totalClimbs pathTokens metadata{ lat lng mp_id isBoulder } } } }`;
@@ -407,19 +428,52 @@ async function downloadRegion() {
   planStatus(`Saved ${enriched.length} crags for offline — you can now use this area with no signal.`, "ok");
   setTimeout(() => { btn.disabled = false; btn.textContent = "⬇ Download"; }, 4000);
 }
-document.getElementById("placeBtn").addEventListener("click", async () => {
+/* autocomplete dropdown */
+let sugItems = [], sugTimer = null;
+const suggestEl = document.getElementById("suggest");
+function renderSuggest(items) {
+  sugItems = items;
+  if (!items.length) { suggestEl.style.display = "none"; suggestEl.innerHTML = ""; return; }
+  suggestEl.innerHTML = items.map((it, i) =>
+    `<div class="sugItem" data-i="${i}"><div class="sName">${it.name}</div>${it.place ? `<div class="sPlace">${it.place}</div>` : ""}</div>`
+  ).join("");
+  // mousedown (not click) fires before the input's blur, so the tap isn't lost.
+  suggestEl.querySelectorAll(".sugItem").forEach(row =>
+    row.addEventListener("mousedown", e => { e.preventDefault(); selectPlace(items[+row.getAttribute("data-i")]); })
+  );
+  suggestEl.style.display = "block";
+}
+function selectPlace(item) {
+  suggestEl.style.display = "none";
+  placeIn.value = item.label;
+  regionCenter = { lat: item.lat, lng: item.lng };
+  regionName = item.label;
+  previewRegion();
+}
+placeIn.addEventListener("input", () => {
+  const q = placeIn.value.trim();
+  planResult.style.display = "none";
+  clearTimeout(sugTimer);
+  if (q.length < 2) { renderSuggest([]); return; }
+  sugTimer = setTimeout(async () => {
+    try { renderSuggest(await photonSearch(q, 6)); }
+    catch (e) { if (e.name !== "AbortError") renderSuggest([]); }
+  }, 300);
+});
+async function runPlaceSearch() {
   const q = placeIn.value.trim();
   if (!q) return;
-  planResult.style.display = "none";
+  if (sugItems.length) { selectPlace(sugItems[0]); return; }
   planStatus(`Finding “${q}”…`);
-  let place;
-  try { place = await geocodePlace(q); }
-  catch { planStatus("Place search failed — check your connection.", "err"); return; }
-  if (!place) { planStatus("Couldn't find that place. Try a more specific name (e.g. “Joshua Tree National Park”).", "err"); return; }
-  regionCenter = { lat: place.lat, lng: place.lng }; regionName = place.name;
-  previewRegion();
-});
-placeIn.addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("placeBtn").click(); });
+  let items;
+  try { items = await photonSearch(q, 1); }
+  catch (e) { if (e.name === "AbortError") return; planStatus("Place search failed — check your connection.", "err"); return; }
+  if (!items.length) { planStatus("Couldn't find that place. Try a different spelling or a nearby town.", "err"); return; }
+  selectPlace(items[0]);
+}
+document.getElementById("placeBtn").addEventListener("click", runPlaceSearch);
+placeIn.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); suggestEl.style.display = "none"; runPlaceSearch(); } });
+placeIn.addEventListener("blur", () => setTimeout(() => { suggestEl.style.display = "none"; }, 200));
 document.getElementById("radiusSel").addEventListener("change", () => { if (regionCenter) previewRegion(); });
 document.getElementById("downloadRegionBtn").addEventListener("click", downloadRegion);
 

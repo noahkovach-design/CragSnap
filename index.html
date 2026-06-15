@@ -141,6 +141,19 @@
   .savedRow small { color: var(--muted); }
   .savedRow .rm { background: none; border: none; color: var(--bad); font-size: .8rem; cursor: pointer; padding: 4px 6px; }
 
+  /* ---- download-an-area panel ---- */
+  .plan { margin-top: 14px; }
+  .planTitle { font-weight: 650; font-size: 1.02rem; }
+  .planSub { color: var(--muted); font-size: .84rem; margin: 2px 0 12px; }
+  .planRow { display: flex; gap: 8px; margin-top: 10px; }
+  .planRow input, .planRow select {
+    flex: 1; min-width: 0; background: var(--card2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 10px; padding: 11px; font-size: .9rem; -webkit-appearance: none; appearance: none;
+  }
+  .planRow input::placeholder { color: #5f7165; }
+  #planInfo { font-size: .88rem; color: var(--text); margin-top: 12px; }
+  #planInfo b { color: var(--accent); }
+
   /* ---- results ---- */
   .sectionTitle { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 22px 4px 8px; }
   .crag { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
@@ -211,6 +224,27 @@
     <img id="preview" alt="your photo" />
     <video id="previewVid" playsinline muted controls style="display:none; width:100%; border-radius:12px; margin-top:14px; max-height:300px; border:1px solid var(--line);"></video>
     <div class="status" id="status"></div>
+  </div>
+
+  <div class="panel plan">
+    <div class="planTitle">🗺️ Download a whole area for offline</div>
+    <div class="planSub">Heading somewhere remote? Save the routes before you lose signal — no photo needed.</div>
+    <div class="planRow">
+      <input id="placeIn" placeholder="Search a place — e.g. Joshua Tree" autocomplete="off" />
+      <button class="btn" id="placeBtn" style="flex:0 0 auto">Search</button>
+    </div>
+    <div id="planResult" style="display:none">
+      <div id="planInfo"></div>
+      <div class="planRow">
+        <select id="radiusSel">
+          <option value="10000">Nearby (~10 km)</option>
+          <option value="25000" selected>Local area (~25 km)</option>
+          <option value="50000">Whole destination (~50 km)</option>
+        </select>
+        <button class="btn saveBtn" id="downloadRegionBtn" style="flex:0 0 auto">⬇ Download</button>
+      </div>
+    </div>
+    <div class="status" id="planStatus"></div>
   </div>
 
   <div id="savedPanel" class="savedPanel" style="display:none"></div>
@@ -304,6 +338,90 @@ async function saveAreaForOffline() {
 }
 document.getElementById("saveOfflineBtn").addEventListener("click", saveAreaForOffline);
 renderSavedPanel();
+
+/* ---------- download a whole region by place name (no photo needed) ---------- */
+let regionCrags = null, regionCenter = null, regionName = "";
+const placeIn = document.getElementById("placeIn");
+const planResult = document.getElementById("planResult");
+const planInfo = document.getElementById("planInfo");
+const planStatusEl = document.getElementById("planStatus");
+function planStatus(msg, cls = "") {
+  planStatusEl.className = "status " + cls;
+  planStatusEl.innerHTML = (cls === "" && msg.includes("…") ? '<span class="spinner"></span>' : "") + "<span>" + msg + "</span>";
+}
+async function geocodePlace(q) {
+  const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(q);
+  const r = await fetch(url, { headers: { "Accept": "application/json" } });
+  const j = await r.json();
+  if (!j || !j.length) return null;
+  return { lat: parseFloat(j[0].lat), lng: parseFloat(j[0].lon), name: j[0].display_name };
+}
+async function fetchRegionCrags(lat, lng, max) {
+  const q = `query($lat:Float!,$lng:Float!,$max:Int!){ cragsNear(lnglat:{lat:$lat,lng:$lng}, maxDistance:$max, includeCrags:true){ crags{ areaName uuid totalClimbs pathTokens metadata{ lat lng mp_id isBoulder } } } }`;
+  const data = await gql(q, { lat, lng, max });
+  const crags = [];
+  (data?.cragsNear || []).forEach(g => crags.push(...(g.crags || [])));
+  return crags.filter(c => c.totalClimbs > 0 && c.metadata && c.metadata.lat != null);
+}
+async function previewRegion() {
+  if (!regionCenter) return;
+  const max = parseInt(document.getElementById("radiusSel").value, 10);
+  planResult.style.display = "none";
+  planStatus("Checking what's in this area…");
+  try { regionCrags = await fetchRegionCrags(regionCenter.lat, regionCenter.lng, max); }
+  catch { planStatus("Couldn't reach the database — check your connection.", "err"); return; }
+  if (!regionCrags.length) { planStatus("No climbing found here in the open database within this radius.", "err"); return; }
+  const routes = regionCrags.reduce((n, c) => n + (c.totalClimbs || 0), 0);
+  planInfo.innerHTML = `<b>${regionName.split(",")[0]}</b> — about <b>${regionCrags.length}</b> crags and <b>${routes}</b> routes within this radius.`;
+  planStatus("");
+  planResult.style.display = "block";
+}
+async function downloadRegion() {
+  if (!regionCrags || !regionCrags.length) return;
+  const btn = document.getElementById("downloadRegionBtn");
+  btn.disabled = true;
+  const crags = regionCrags, BATCH = 35, byUuid = {};
+  for (let i = 0; i < crags.length; i += BATCH) {
+    const chunk = crags.slice(i, i + BATCH);
+    btn.textContent = `Downloading… ${Math.min(i + BATCH, crags.length)}/${crags.length}`;
+    // One HTTP request fetches many crags' climbs via GraphQL aliases.
+    const q = "query{ " + chunk.map((c, j) => `a${j}: area(uuid:"${c.uuid}"){ climbs{ name metadata{ mp_id } grades{ vscale font } } }`).join(" ") + " }";
+    let data = {};
+    try {
+      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }) });
+      data = (await r.json()).data || {};
+    } catch { data = {}; }
+    chunk.forEach((c, j) => { const a = data["a" + j]; byUuid[c.uuid] = (a && a.climbs) || []; });
+  }
+  const enriched = crags.map(c => ({ areaName: c.areaName, uuid: c.uuid, totalClimbs: c.totalClimbs, pathTokens: c.pathTokens, metadata: c.metadata, climbs: byUuid[c.uuid] || [] }));
+  const packs = loadPacks();
+  packs.push({ id: String(Date.now()), label: (regionName.split(",")[0] || packLabel(enriched)), savedAt: Date.now(), center: regionCenter, crags: enriched });
+  try { savePacks(packs); }
+  catch {
+    btn.disabled = false; btn.textContent = "⬇ Download";
+    planStatus("Couldn't save — your phone's storage for this app may be full. Remove a saved area and try again.", "err");
+    return;
+  }
+  btn.textContent = "✓ Downloaded";
+  renderSavedPanel();
+  planStatus(`Saved ${enriched.length} crags for offline — you can now use this area with no signal.`, "ok");
+  setTimeout(() => { btn.disabled = false; btn.textContent = "⬇ Download"; }, 4000);
+}
+document.getElementById("placeBtn").addEventListener("click", async () => {
+  const q = placeIn.value.trim();
+  if (!q) return;
+  planResult.style.display = "none";
+  planStatus(`Finding “${q}”…`);
+  let place;
+  try { place = await geocodePlace(q); }
+  catch { planStatus("Place search failed — check your connection.", "err"); return; }
+  if (!place) { planStatus("Couldn't find that place. Try a more specific name (e.g. “Joshua Tree National Park”).", "err"); return; }
+  regionCenter = { lat: place.lat, lng: place.lng }; regionName = place.name;
+  previewRegion();
+});
+placeIn.addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("placeBtn").click(); });
+document.getElementById("radiusSel").addEventListener("change", () => { if (regionCenter) previewRegion(); });
+document.getElementById("downloadRegionBtn").addEventListener("click", downloadRegion);
 
 function setStatus(msg, cls = "") {
   statusEl.className = "status " + cls;
